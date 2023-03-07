@@ -1,4 +1,5 @@
 using CUDA
+using LinearAlgebra
 
 function logdet!(m)
     X_d, _ = CUSOLVER.getrf!(m)
