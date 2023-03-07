@@ -37,12 +37,14 @@ function EmergencePsi(X, V, tau=1, method="gaussian")
     end
 
     ## Compute mutual infos & psi()
-    v_mi = MI_fun(V[1:end-tau, :], V[1+tau:end, :])
+    v_mi = CUDA.@allowscalar MI_fun(V[1:end-tau, :], V[1+tau:end, :])
 
-    x_mi = mapreduce(j -> MI_fun(X[1:end-tau, j], V[1+tau:end, :]), +, 1:size(X, 2))
+    x_mi = CUDA.@allowscalar mapreduce(j -> MI_fun(X[1:end-tau, j], V[1+tau:end, :]), +, 1:size(X, 2))
 
     psi = v_mi - x_mi
 
-    return psi, v_mi, x_mi
+    return psi
+
+    # return psi, v_mi, x_mi
 
 end

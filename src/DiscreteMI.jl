@@ -36,6 +36,7 @@ end
 
 # create the 'ic' output from matlabs unique function
 # @see https://uk.mathworks.com/help/matlab/ref/double.unique.html
+# TODO: this doesn't work for CuArrays
 function unique_rows(x::AbstractArray)
     cc = mapreduce(string, *, x, dims=2)
     return indexin(cc,sort(unique(cc)))
