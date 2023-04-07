@@ -9,8 +9,16 @@ function GaussianMI(X, Y)
     end
 
     Dx  = size(X, 2)
-    rho = cor([X Y])
-    mi  = 0.5 * (@views logdet(rho[1:Dx, 1:Dx]) + logdet(rho[Dx+1:end, Dx+1:end]) - logdet(rho))
+    xy = [X Y]
+    rho = cor(xy)
+    ld1 = logdet(rho[1:Dx, 1:Dx])
+    ld2 = logdet(rho[Dx+1:end, Dx+1:end])
+    ld3 = logdet(rho)       
+    @show rho[1:1,1:1]
+    @show ld1
+    @show ld2
+    @show ld3
+    mi  = 0.5 * (ld1 + ld2 - ld3)
 
     return mi
 

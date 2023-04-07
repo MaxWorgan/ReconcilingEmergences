@@ -1,4 +1,5 @@
 using CUDA, Folds, Transducers, FoldsCUDA
+using CausalityTools
 
 function EmergencePsi(X, V, tau=1, method="gaussian")
     ## EMERGENCEPSI Compute causal emergence criterion from data
