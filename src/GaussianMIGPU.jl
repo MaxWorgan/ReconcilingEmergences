@@ -1,47 +1,137 @@
 using CUDA
-using LinearAlgebra: checksquare, BlasInt
+using LinearAlgebra
+using LinearAlgebra: BlasInt, checksquare
+using Statistics 
 
-"""
-    TODO:
-    1) avoid reshaping of arrays
+function compute_single_MI(x,v,C,col_means,col_std,rho)
 
-"""
-function computeMU(x, v, C, rho, c_index, col_means, col_std, logdet_rho, logdet_s2rho)
+    @cuda threads = 512 blocks = 80 calculate_cor_kernel(x, v, C, col_means, col_std, rho)
 
-    @cuda threads = 100 calc_ψ_kernel(x, v, C, rho, c_index, col_means, col_std)
+    Dx = size(x,2)
+    ld1 = logdet_via_LU(rho[1:Dx, 1:Dx])
+    ld2 = logdet_via_LU(rho[Dx+1:end, Dx+1:end])
+    ld3 = logdet_via_LU(rho)
 
-    reshaped_s1rho = [(rho[1, 1, i]) for i in 1:size(rho)[end]] |> cu
-    reshaped_s2rho = [(rho[2:end, 2:end, i]) for i in 1:size(rho)[end]] 
-    reshaped_rho   = [(rho[:, :, i]) for i in 1:size(rho)[end]]
+    return sum(0.5 * (ld1 + ld2 - ld3))
 
-    rho, _ = callBatchedCholesky(reshaped_rho)
-    input1 = reshape(reduce(hcat, rho), 11, 11, size(x,2))
-    @cuda threads = 100 logdet_kernel(input1, logdet_rho)
+end
 
-    s2rho, _ = callBatchedCholesky(reshaped_s2rho)
+function compute_reduced_MI(x, v, C, rho, c_index, col_means, col_std, logdet_rho, logdet_s2rho)
+
+    @cuda threads = 384 blocks = 80 calculate_cor_kernel_batched(x, v, C, rho, c_index, col_means, col_std)
+
+    reshaped_s1rho = CUDA.@allowscalar [(rho[1, 1, i]) for i in 1:size(rho)[end]]
+    reshaped_s2rho = CUDA.@allowscalar [(rho[2:end, 2:end, i]) for i in 1:size(rho)[end]] 
+    reshaped_rho   = CUDA.@allowscalar [(rho[:, :, i]) for i in 1:size(rho)[end]]
+
+    rho    = callBatchedCholesky(reshaped_rho)
+    input1 = reshape(reduce(hcat, rho), (11, 11, size(x,2)))
+    @cuda threads = 1024 blocks = 160 logdet_kernel(input1, logdet_rho)
+
+    s2rho = callBatchedCholesky(reshaped_s2rho)
     input2 = reshape(reduce(hcat, s2rho), 10, 10, size(x,2))
-    @cuda threads = 100 logdet_kernel(input2, logdet_s2rho)
+    @cuda threads = 1024 blocks=160 logdet_kernel(input2, logdet_s2rho)
 
-    return sum(0.5 .* (log(reshaped_s1rho[1]).+ logdet_s2rho .- logdet_rho))
+    return CUDA.@allowscalar sum(0.5 .* (log(reshaped_s1rho[1]).+ logdet_s2rho .- logdet_rho))
 
 end
 
 """
-    Calculate ψ across two time series X and V
-    X is the time series1 - 48(minus last) x 18000
-    V is the time series2 - 48(minus first) x 10
-    C is the concatenated array - 47 x 11 x 18000
-    rho is the correlation matrix - 11 x 11 x 18000
-    col_means is the mean of each column of C - 11 x 18000
 
-    The main indicies
+    Calculate the correlation matrix of X and V
+    Step 1) Concatenate X and V into C
+    Step 2) Calculate the mean of each column of C
+    Step 3) Calculate the standard deviation of each column of C
+    Step 4) Center the data by subtracting the mean and dividing by the standard deviation of each column of C 
+    Step 5) Calculate the correlation matrix of C (by calculating the covariance matrix of the centered C)
+
 """
-function calc_ψ_kernel(X, V, C, rho, c_index, col_means, col_std)
+function calculate_cor_kernel(X,V,C,col_means,col_std,rho)
+
+    thread_id = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if thread_id <= (size(X,2) + size(V,2))
+        c = thread_id
+        if c <= size(X, 2) # if 51 <= 50
+            for r in 1:size(X,1) # do a row
+                C[r,c] = X[r, c]
+            end
+        else
+            for r in 1:size(V,1) # do a row
+                C[r,c] = V[r, c-size(X,2)]
+            end
+       end
+    end
+
+    sync_threads()
+
+     # calculate the mean of each column of C
+    if thread_id <= size(C,2)
+        sum = 0.0f32
+        for c_j in 1:size(C,1) ## 47
+            sum += C[c_j, thread_id]
+        end
+        col_means[thread_id] = sum / size(C, 1)
+    end
+
+    sync_threads()
+
+    # calculate the std of each column of C
+    if thread_id <= size(C,2)
+        sum = 0.0f32
+        for c_j in 1:size(C)[1] ## 47
+            sum += (C[c_j, thread_id] - col_means[thread_id])^2
+        end
+        col_std[thread_id] = sqrt(sum / (size(C, 1) - 1))
+    end
+
+    sync_threads()
+
+    # center data by subtracting mean and dividing by std
+    if thread_id <= size(C, 2)
+        for c_i in 1:size(C, 1) ## 47
+            C[c_i, thread_id] -= col_means[thread_id]
+            C[c_i, thread_id] /= col_std[thread_id]
+        end
+    end
+
+    sync_threads()
+
+    # calculate covariance of the centered data correlation matrix
+    if thread_id <= size(rho, 2)
+        i = thread_id # 18010
+        for j in 1:size(rho, 2) # 18010
+            s = 0.0
+            for k in 1:size(C, 1)
+                s += C[k, i] * C[k, j]
+            end
+            rho[i, j] = s / (size(C, 1) - 1)
+            rho[j, i] = rho[i, j]
+        end
+    end
+
+    sync_threads()
+
+    return nothing
+
+end
+
+"""
+    Batch calculate the correlation matricies across two time series X and V
+    X is the time series1 - n x m
+    V is the time series2 - n x p
+    C is the concatenated array - n x p+1 x m
+    rho is the correlation matrix - p+1 x p+1 x m
+    col_means is the mean of each column of C - p+1 x m
+    col_std is the standard deviation of each column of C - p+1 x m
+
+"""
+function calculate_cor_kernel_batched(X, V, C, rho, c_index, col_means, col_std)
     thread_id = (blockIdx().x - 1) * blockDim().x + threadIdx().x
 
     # horizontally concatenate A and B into C
     if thread_id <= size(X,2)
-        A = @view(X[1:end-1, thread_id])
+        A = @view(X[:, thread_id])
         cix = c_index[thread_id]
         for ci in cix
             if ci[2] <= size(A, 2)
@@ -122,8 +212,12 @@ function calc_ψ_kernel(X, V, C, rho, c_index, col_means, col_std)
     return nothing
 end
 
-# inputs = 1D array of size batch containing 2D arrays of size (n, n) - the top diagonal is the cholesky factor
-# outputs = 1D array of size batch containing the log det of each matrix
+"""
+
+    Batch calculate the log determinant of a cholesky decomposition of a correlation matrix
+    inputs - the batch of cholesky decomposition of the correlation matricies
+
+"""
 function logdet_kernel(inputs, outputs)
 
     thread_id = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -142,8 +236,23 @@ function logdet_kernel(inputs, outputs)
     return nothing
 end
 
+"""
 
+    Calculate the log determinant of a single matrix, used for the v_mi calculation
+    LU decomposition seems to be more stable than cholesky decomposition
 
+"""
+function logdet_via_LU(A)
+    x,_ = CUSOLVER.getrf!(copy(A))
+    return sum(log.(abs.(diag(x))))
+end
+
+"""
+
+    Call the batch cholesky solver library - reimplemented here because the original couldn't handle views of matricies
+    TODO: investigate if this is still true
+
+"""
 function callBatchedCholesky(A)
     # Set up information for the solver arguments
     n = checksquare(A[1])
@@ -165,7 +274,7 @@ function callBatchedCholesky(A)
         chkargsok(BlasInt(info[i]))
     end
 
-    return A, info
+    return A
 
 end
 
@@ -179,35 +288,3 @@ end
     ptrs = pointer.(batch)
     return CuArray(ptrs)
 end
-@inline function unsafe_batch(batch::Vector{<:CuArray{T}}) where {T}
-    ptrs = pointer.(batch)
-    return CuArray(ptrs)
-end
-
-num_of_samples = 18000
-
-x = CUDA.rand(Float32, 48, num_of_samples) |> cu
-v = CUDA.rand(Float32, 48, 10) |> cu
-c_index = [CartesianIndices((1:(size(x,1) -1), 1:(size(v,2) + 1), i:i)) for i in 1:size(x)[end]] |> cu
-logdet_rho = CUDA.zeros(Float32, size(x)[end])
-logdet_s2rho = CUDA.zeros(Float32, size(x)[end])
-
-C = CUDA.zeros(Float32, 47, 11, size(x)[end])
-rho = CUDA.zeros(Float32, 11, 11, size(x)[end])
-col_means = CUDA.zeros(size(x)[end], 11)
-col_std = CUDA.zeros(size(x)[end], 11)
-@btime computeMU(x,v[2:end, :], C, rho, c_index, col_means, col_std, logdet_rho, logdet_s2rho)
-
-
-using BenchmarkTools
-logdet_rho
-logdet_s2rho
-
-col_std
-col_means
-
-rho
-
-C
-
-CUSOLVER.potrfBatched!
