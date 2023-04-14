@@ -1,38 +1,42 @@
 using CUDA
+using NVTX
 using LinearAlgebra
 using LinearAlgebra: BlasInt, checksquare
 using Statistics 
 
 function compute_single_MI(x,v,C,col_means,col_std,rho)
 
-    @cuda threads = 512 blocks = 80 calculate_cor_kernel(x, v, C, col_means, col_std, rho)
+    NVTX.@range "Single cor kernel" begin
+        @cuda threads = 512 blocks = 80 calculate_cor_kernel(x, v, C, col_means, col_std, rho)
+    end
+
 
     Dx = size(x,2)
-    ld1 = logdet_via_LU(rho[1:Dx, 1:Dx])
-    ld2 = logdet_via_LU(rho[Dx+1:end, Dx+1:end])
-    ld3 = logdet_via_LU(rho)
+    NVTX.@range "LU Logdet 1" begin ld1 = logdet_via_LU(rho[1:Dx, 1:Dx]) end
+    NVTX.@range "LU Logdet 2" begin ld2 = logdet_via_LU(rho[Dx+1:end, Dx+1:end]) end
+    NVTX.@range "LU Logdet 3" begin ld3 = logdet_via_LU(rho) end
 
     return sum(0.5 * (ld1 + ld2 - ld3))
 
 end
 
-function compute_reduced_MI(x, v, C, rho, c_index, col_means, col_std, logdet_rho, logdet_s2rho)
+function compute_reduced_MI(x, v, C, rho1, rho2, c_index, col_means, col_std, logdet_rho, logdet_s2rho)
 
-    @cuda threads = 384 blocks = 80 calculate_cor_kernel_batched(x, v, C, rho, c_index, col_means, col_std)
+    NVTX.@range "Batched cor kernel" begin
+        @cuda threads = 384 blocks = 80 calculate_cor_kernel_batched(x, v, C, c_index, col_means, col_std, rho1, rho2)
+    end
 
-    reshaped_s1rho = CUDA.@allowscalar [(rho[1, 1, i]) for i in 1:size(rho)[end]]
-    reshaped_s2rho = CUDA.@allowscalar [(rho[2:end, 2:end, i]) for i in 1:size(rho)[end]] 
-    reshaped_rho   = CUDA.@allowscalar [(rho[:, :, i]) for i in 1:size(rho)[end]]
+    reshaped_rho  = CuArray(map(pointer, eachslice(rho1, dims=3)))
+    NVTX.@range "Batched Cholesky 1" begin callBatchedCholesky!(reshaped_rho,size(rho1,1), size(rho1,1)) end
+    NVTX.@range "logdet 1 " begin @cuda threads = 1024 blocks = 160 logdet_kernel(rho1, logdet_rho) end
 
-    rho    = callBatchedCholesky(reshaped_rho)
-    input1 = reshape(reduce(hcat, rho), (11, 11, size(x,2)))
-    @cuda threads = 1024 blocks = 160 logdet_kernel(input1, logdet_rho)
+    reshaped_rho2 = CuArray(map(pointer, eachslice(rho2, dims=3)))
+    NVTX.@range "Batched Cholesky 2" begin callBatchedCholesky!(reshaped_rho2, size(rho2,1), size(rho2,1)) end
+    NVTX.@range "logdet 2" begin @cuda threads = 1024 blocks=160 logdet_kernel(rho2, logdet_s2rho) end
 
-    s2rho = callBatchedCholesky(reshaped_s2rho)
-    input2 = reshape(reduce(hcat, s2rho), 10, 10, size(x,2))
-    @cuda threads = 1024 blocks=160 logdet_kernel(input2, logdet_s2rho)
+    NVTX.@range "result" begin result = sum(0.5 .* (logdet_s2rho .- logdet_rho)) end
 
-    return CUDA.@allowscalar sum(0.5 .* (log(reshaped_s1rho[1]).+ logdet_s2rho .- logdet_rho))
+    return  result
 
 end
 
@@ -126,7 +130,7 @@ end
     col_std is the standard deviation of each column of C - p+1 x m
 
 """
-function calculate_cor_kernel_batched(X, V, C, rho, c_index, col_means, col_std)
+function calculate_cor_kernel_batched(X, V, C, c_index, col_means, col_std, rho1, rho2)
     thread_id = (blockIdx().x - 1) * blockDim().x + threadIdx().x
 
     # horizontally concatenate A and B into C
@@ -191,18 +195,23 @@ function calculate_cor_kernel_batched(X, V, C, rho, c_index, col_means, col_std)
     sync_threads()
 
     # calculate covariance of the centered data correlation matrix
-    if thread_id <= size(rho, 3)
+    if thread_id <= size(rho1, 3)
         cix = c_index[thread_id]
         t_c = @view(C[cix])
-        v_rho = @view(rho[:, :, thread_id])
-        for i in 1:size(rho, 1) # 11
-            for j in 1:size(rho, 2) # 11
+        v_rho1 = @view(rho1[:, :, thread_id])
+        v_rho2 = @view(rho2[:, :, thread_id])
+        for i in 1:size(rho1, 1) # 11
+            for j in 1:size(rho1, 2) # 11
                 s = 0.0
                 for k in 1:size(t_c, 1)
                     s += t_c[k, i] * t_c[k, j]
                 end
-                v_rho[i, j] = s / (size(t_c, 1) - 1)
-                v_rho[j, i] = v_rho[i, j]
+                v_rho1[i, j] = s / (size(t_c, 1) - 1)
+                v_rho1[j, i] = v_rho1[i, j]
+                i2 = max(i-1,1)
+                j2 = max(j-1,1)
+                v_rho2[i2, j2] = v_rho1[i, j]
+                v_rho2[j2, i2] = v_rho2[i2, j2]
             end
         end
     end
@@ -255,6 +264,7 @@ end
 """
 function callBatchedCholesky(A)
     # Set up information for the solver arguments
+    
     n = checksquare(A[1])
     lda = max(1, stride(A[1], 2))
     batchSize = length(A)
@@ -277,6 +287,33 @@ function callBatchedCholesky(A)
     return A
 
 end
+
+
+function callBatchedCholesky!(A, lda, n)
+    # Set up information for the solver arguments
+    
+    # lda = max(1, stride(A[1], 2))
+    batchSize = length(A)
+    devinfo = CuArray{Cint}(undef, batchSize)
+
+    # Aptrs = unsafe_batch(A)
+
+    # Run the solver
+    CUSOLVER.cusolverDnSpotrfBatched(CUSOLVER.dense_handle(), 'U', n, A, lda, devinfo, batchSize)
+
+    # Copy the solver info and delete the device memory
+    info = CUDA.@allowscalar collect(devinfo)
+    CUDA.unsafe_free!(devinfo)
+
+    # Double check the solver's exit status
+    for i = 1:batchSize
+        chkargsok(BlasInt(info[i]))
+    end
+
+    return nothing
+
+end
+
 
 function chkargsok(ret::BlasInt)
     if ret < 0
