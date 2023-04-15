@@ -4,6 +4,9 @@ using LinearAlgebra
 using LinearAlgebra: BlasInt, checksquare
 using Statistics 
 
+"""
+    Compute the mutual information between two time series X and V
+"""
 function compute_single_MI(x,v,C,col_means,col_std,rho)
 
     NVTX.@range "Single cor kernel" begin
@@ -20,6 +23,9 @@ function compute_single_MI(x,v,C,col_means,col_std,rho)
 
 end
 
+"""
+    Compute the mutual information between every column of X and the whole of V, summing the results
+"""
 function compute_reduced_MI(x, v, C, rho1, rho2, c_index, col_means, col_std, logdet_rho, logdet_s2rho)
 
     NVTX.@range "Batched cor kernel" begin
@@ -122,12 +128,16 @@ end
 
 """
     Batch calculate the correlation matricies across two time series X and V
+
     X is the time series1 - n x m
     V is the time series2 - n x p
     C is the concatenated array - n x p+1 x m
-    rho is the correlation matrix - p+1 x p+1 x m
     col_means is the mean of each column of C - p+1 x m
     col_std is the standard deviation of each column of C - p+1 x m
+    rho1 is the resulting correlation matrix - p+1 x p+1 x m
+    rho2 is a subset of the resulting correlation matrix - p x p x m
+
+    We populate both rho1 and rho2 to avoid unnessary copies later
 
 """
 function calculate_cor_kernel_batched(X, V, C, c_index, col_means, col_std, rho1, rho2)
@@ -257,46 +267,12 @@ function logdet_via_LU(A)
 end
 
 """
-
-    Call the batch cholesky solver library - reimplemented here because the original couldn't handle views of matricies
-    TODO: investigate if this is still true
-
+    Call the batch cholesky solver library - overwriting the input matrix A
 """
-function callBatchedCholesky(A)
-    # Set up information for the solver arguments
-    
-    n = checksquare(A[1])
-    lda = max(1, stride(A[1], 2))
-    batchSize = length(A)
-    devinfo = CuArray{Cint}(undef, batchSize)
-
-    Aptrs = unsafe_batch(A)
-
-    # Run the solver
-    CUSOLVER.cusolverDnSpotrfBatched(CUSOLVER.dense_handle(), 'U', n, Aptrs, lda, devinfo, batchSize)
-
-    # Copy the solver info and delete the device memory
-    info = CUDA.@allowscalar collect(devinfo)
-    CUDA.unsafe_free!(devinfo)
-
-    # Double check the solver's exit status
-    for i = 1:batchSize
-        chkargsok(BlasInt(info[i]))
-    end
-
-    return A
-
-end
-
-
 function callBatchedCholesky!(A, lda, n)
-    # Set up information for the solver arguments
     
-    # lda = max(1, stride(A[1], 2))
     batchSize = length(A)
     devinfo = CuArray{Cint}(undef, batchSize)
-
-    # Aptrs = unsafe_batch(A)
 
     # Run the solver
     CUSOLVER.cusolverDnSpotrfBatched(CUSOLVER.dense_handle(), 'U', n, A, lda, devinfo, batchSize)
@@ -307,21 +283,11 @@ function callBatchedCholesky!(A, lda, n)
 
     # Double check the solver's exit status
     for i = 1:batchSize
-        chkargsok(BlasInt(info[i]))
+        if info[i] < 0
+            throw(ArgumentError("invalid argument #$(-info[i]) to LAPACK call"))
+        end
     end
 
     return nothing
 
-end
-
-
-function chkargsok(ret::BlasInt)
-    if ret < 0
-        throw(ArgumentError("invalid argument #$(-ret) to LAPACK call"))
-    end
-end
-# create a batch of pointers in device memory from a batch of device arrays
-@inline function unsafe_batch(batch::Vector{<:CuArray{T}}) where {T}
-    ptrs = pointer.(batch)
-    return CuArray(ptrs)
 end

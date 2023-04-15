@@ -21,11 +21,11 @@ function EmergencePsiGPU(x,v, tau=1)
     col_std2 = CUDA.zeros(size(C2)[2])
     end
 
-    NVTX.@range "Computing reduced MI" begin
+    NVTX.@range "Computing X MI" begin
         x_mi = compute_reduced_MI(x[1:end-tau,:], v[1+tau:end,:], C1, rho1, rho2, c_index, col_means1, col_std1, logdet_rho, logdet_s2rho)
     end
 
-    NVTX.@range "Computing single MI" begin
+    NVTX.@range "Computing V MI" begin
         v_mi = compute_single_MI(v[1:end-tau,:], v[1+tau:end,:], C2, col_means2, col_std2, rho3)
     end
 
