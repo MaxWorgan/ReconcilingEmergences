@@ -1,4 +1,4 @@
-using CUDA, Folds, Transducers, FoldsCUDA
+using CUDA
 
 function EmergencePsi(X, V, tau=1, method="gaussian")
     ## EMERGENCEPSI Compute causal emergence criterion from data
@@ -41,8 +41,7 @@ function EmergencePsi(X, V, tau=1, method="gaussian")
     ## Compute mutual infos & psi()
     v_mi = CUDA.@allowscalar @views GaussianMI(V[1:end-tau, :], V[1+tau:end, :])
 
-    # x_mi = CUDA.@allowscalar mapfoldl(j -> GaussianMI(X[1:end-tau, j], V[1+tau:end, :]), add!, 1:size(X, 2); init=0.0)
-    x_mi = CUDA.@allowscalar @views Folds.mapreduce(k -> GaussianMI(X[1:end-tau, k], V[1+tau:end, :]),+, 1:size(X,2))
+    x_mi = CUDA.@allowscalar @views mapreduce(k -> GaussianMI(X[1:end-tau, k], V[1+tau:end, :]),+, 1:size(X,2))
 
     return v_mi - x_mi
 

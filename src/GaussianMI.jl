@@ -1,5 +1,4 @@
 using Statistics
-using Distributions
 using LinearAlgebra
 using CUDA
 
