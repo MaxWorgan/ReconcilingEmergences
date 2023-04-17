@@ -27,6 +27,6 @@ function EmergencePsiGPU(x,v, tau=1)
         v_mi = compute_single_MI(v[1:end-tau,:], v[1+tau:end,:], C2, col_means2, col_std2, rho3)
     end
 
-    return v_mi - x_mi
+    return (v_mi - x_mi, x_mi, v_mi)
 
 end
