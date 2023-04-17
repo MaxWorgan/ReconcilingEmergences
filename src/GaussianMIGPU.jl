@@ -1,7 +1,6 @@
 using CUDA
 using NVTX
 using LinearAlgebra
-using LinearAlgebra: BlasInt, checksquare
 using Statistics 
 
 """
@@ -12,7 +11,6 @@ function compute_single_MI(x,v,C,col_means,col_std,rho)
     NVTX.@range "Single cor kernel" begin
         @cuda threads = 512 blocks = 80 calculate_cor_kernel(x, v, C, col_means, col_std, rho)
     end
-
 
     Dx = size(x,2)
     NVTX.@range "LU Logdet 1" begin ld1 = logdet_via_LU(rho[1:Dx, 1:Dx]) end
@@ -33,16 +31,17 @@ function compute_reduced_MI(x, v, C, rho1, rho2, c_index, col_means, col_std, lo
     end
 
     reshaped_rho  = CuArray(map(pointer, eachslice(rho1, dims=3)))
-    NVTX.@range "Batched Cholesky 1" begin callBatchedCholesky!(reshaped_rho,size(rho1,1), size(rho1,1)) end
-    NVTX.@range "logdet 1 " begin @cuda threads = 1024 blocks = 160 logdet_kernel(rho1, logdet_rho) end
-
     reshaped_rho2 = CuArray(map(pointer, eachslice(rho2, dims=3)))
+
+    NVTX.@range "Batched Cholesky 1" begin callBatchedCholesky!(reshaped_rho,  size(rho1,1), size(rho1,1)) end
     NVTX.@range "Batched Cholesky 2" begin callBatchedCholesky!(reshaped_rho2, size(rho2,1), size(rho2,1)) end
-    NVTX.@range "logdet 2" begin @cuda threads = 1024 blocks=160 logdet_kernel(rho2, logdet_s2rho) end
+
+    NVTX.@range "logdet 1" begin @cuda threads = 1024 blocks = 160 logdet_kernel(rho1, logdet_rho) end
+    NVTX.@range "logdet 2" begin @cuda threads = 1024 blocks = 160 logdet_kernel(rho2, logdet_s2rho) end
 
     NVTX.@range "result" begin result = sum(0.5 .* (logdet_s2rho .- logdet_rho)) end
 
-    return  result
+    return result
 
 end
 
