@@ -2,7 +2,7 @@ using CUDA
 using Statistics
 using LinearAlgebra
 
-num_of_samples = 20000
+num_of_samples = 18000
 
 x = CUDA.rand(Float32, 48, num_of_samples) |> cu
 v = CUDA.rand(Float32, 48, 10) |> cu
@@ -17,7 +17,8 @@ rho3 = CUDA.zeros(Float32, 1, 1, size(x)[end])
 col_means = CUDA.zeros(size(x)[end], 11)
 col_std = CUDA.zeros(size(x)[end], 11)
 
-@cuda threads=384 blocks=80 calculate_cor_kernel_batched(x[1:end-1,:], v[2:end,:], C, c_index, col_means, col_std, rho1, rho2)
+z = @cuda launch=false calculate_cor_kernel_batched(x[1:end-1,:], v[2:end,:], C, c_index, col_means, col_std, rho1, rho2)
+launch_configuration(z.fun)
 
 rho2
 reshaped_rho  = CuArray(map(pointer, eachslice(rho1, dims=3)))
@@ -33,14 +34,18 @@ C = CUDA.zeros(Float32, 47, size(v,2) + size(v,2))
 rho = CUDA.zeros(Float32, size(C,2), size(C,2))
 col_means = CUDA.zeros(size(C,2))
 col_std = CUDA.zeros(size(C,2))
-@cuda threads=512 blocks=80 calculate_cor_kernel(v[1:end-1,:],v[2:end,:],C,col_means, col_std,rho)
+z2 = @cuda launch=false calculate_cor_kernel(v[1:end-1,:],v[2:end,:],C,col_means, col_std,rho)
+launch_configuration(z2.fun)
 rho
 
 compute_single_MI(v[1:end-1,:],v[2:end, :], C, col_means, col_std, rho)
 rho
 
 
-EmergencePsiGPU(x,v)
+x = CUDA.rand(Float32, num_of_samples, 48) |> cu
+v = CUDA.rand(Float32, 10, 48) |> cu
+
+@btime EmergencePsiGPU(permutedims(x,(2,1)),permutedims(v,(2,1)))
 
 
 C
@@ -48,7 +53,7 @@ C
 GaussianMI(v[1:end-1,:],v[2:end,:])
 
 
-t = @cuda launch=fa lse logdet_kernel(rho,logdet_rho)
+t = @cuda launch=false logdet_kernel(rho,logdet_rho)
 
 launch_configuration(t.fun)
 
