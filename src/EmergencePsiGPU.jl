@@ -1,6 +1,4 @@
 using CUDA
-using NVTX
-
 
 function EmergencePsiGPU(x,v, tau=1)
 
