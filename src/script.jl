@@ -19,7 +19,14 @@ col_std = CUDA.zeros(size(x)[end], 11)
 
 z = @cuda launch=false calculate_cor_kernel_batched(x[1:end-1,:], v[2:end,:], C, c_index, col_means, col_std, rho1, rho2)
 launch_configuration(z.fun)
+z = @cuda launch=false calculate_cor_kernel_batched(x[1:end-1,:], v[2:end,:], C, c_index, col_means, col_std, rho1, rho2)
 
+@cuda threads = 896 blocks = 128 calculate_cor_kernel_batched(x, v, C, c_index, col_means, col_std, rho1, rho2)
+
+
+col_means[2,:]
+
+dmi_dx(col_means[1,:],col_std[1,:],)
 rho2
 reshaped_rho  = CuArray(map(pointer, eachslice(rho1, dims=3)))
 reshaped_rho2 = CuArray(map(pointer, eachslice(rho2, dims=3)))
